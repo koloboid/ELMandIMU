@@ -214,7 +214,7 @@ static void count_bonds(void)
 static void recovery_done(const ble_addr_t *keep, uint16_t keep_conn)
 {
     ble_addr_t peers[BLE_MAX_BONDS];
-    int n = 0, erased = 0;
+    int n = 0, erased = 0, failed = 0;
     if (ble_store_util_bonded_peers(peers, &n, BLE_MAX_BONDS) == 0) {
         for (int i = 0; i < n; i++) {
             if (ble_addr_cmp(&peers[i], keep) == 0) {
@@ -232,8 +232,15 @@ static void recovery_done(const ble_addr_t *keep, uint16_t keep_conn)
                 addr_str(&peers[i], a);
                 cfg_phone_erase(a);
                 erased++;
+            } else {
+                failed++;
             }
         }
+    }
+    // The new phone has no record yet. When every old bond is gone, erasing all also drops the records of bonds
+    // that NimBLE deleted itself on a full store (BLE_STORE_EVENT_OVERFLOW).
+    if (failed == 0) {
+        cfg_phone_erase(NULL);
     }
     count_bonds();
     window_close();
@@ -289,7 +296,10 @@ static void advertise(void)
     if (rc == 0) {
         rc = ble_gap_adv_start(s_addr_type, NULL, BLE_HS_FOREVER, &p, gap_event, NULL);
     }
-    if (rc != 0 && rc != BLE_HS_EALREADY) {
+    if (rc == BLE_HS_ENOMEM) {
+        // No free connection slot yet (a link is being set up); ble_poll() restarts advertising.
+        ESP_LOGW(TAG, "advertising not started: no memory, retry");
+    } else if (rc != 0 && rc != BLE_HS_EALREADY) {
         ESP_LOGE(TAG, "реклама не запустилась: %d", rc);
     }
 }
@@ -826,6 +836,7 @@ void ble_poll(void)
         if (adv_flags() != s_adv_flags) {
             set_adv_data();
         }
+        advertise();    // no-op while advertising or full; retries after a failed start
         for (int i = 0; i < BLE_LINKS; i++) {
             link_t *l = &s_links[i];
             if (l->conn == BLE_HS_CONN_HANDLE_NONE) {
